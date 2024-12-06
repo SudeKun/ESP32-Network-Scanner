@@ -1,5 +1,5 @@
 ## ESP32-NetworkScanner
-The goal of this project is to create a network scanner utilizing ARP (Address Resolution Protocol) to identify devices on a Local Area Network (LAN). The objective is to develop an energy-efficient scanner capable of operating 24/7, with data accessible through a user-friendly web interface.
+The goal of this project is to create a network scanner utilizing ARP (Address Resolution Protocol) to identify devices on a Local Area Network (LAN). The objective is to develop an energy-efficient scanner capable of operating 24/7, with data accessible through a web interface.
 
 ### Web Interface
 ![WEBINTERFACE](https://raw.githubusercontent.com/liquidCS/ESP32-NetworkScanner/main/resources/esp32-ARP.png)
