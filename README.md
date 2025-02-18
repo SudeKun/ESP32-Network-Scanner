@@ -13,7 +13,7 @@ The goal of this project is to create a network scanner utilizing ARP (Address R
 ## Install
 
 1. Install [esp-idf](https://github.com/espressif/esp-idf)
-2. clone this repo using `https://github.com/liquidCS/ESP32-NetworkScanner.git`
+2. clone this repo using `git clone https://github.com/liquidCS/ESP32-NetworkScanner.git`
 3. cd into the project's main folder using `cd ESP32-NetworkScanner/main`
 4. Edit"WIFI_SSID" and "WIFI_PASSWORD" in wifiConnect.c  
 5. Run `idf.py build` to build the project
