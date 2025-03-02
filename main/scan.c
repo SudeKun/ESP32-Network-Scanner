@@ -18,6 +18,7 @@
 // Define
 #define TAG "SCAN"
 #define ARPTIMEOUT 5000
+#define ARP_TABLE_SIZE 5
 
 // functions
 uint32_t switch_ip_orientation (uint32_t *);
@@ -78,8 +79,8 @@ void arpScan(void *param) {
             esp_ip4_addr_t currAddrs[5]; // save current loop ip
             int currCount = 0; // for checking Arp table use
 
-            // send 5 ARP request a time because ARP table has limit size
-            for(int i=0; i<5; i++){
+            // send ARP request in batches ARP table has limit size
+            for(int i=0; i<ARP_TABLE_SIZE; i++){
                 nextIP(&target_ip); // next ip
                 if(target_ip.addr != last_ip.addr){
                     esp_ip4addr_ntoa(&target_ip, char_target_ip, IP4ADDR_STRLEN_MAX);
