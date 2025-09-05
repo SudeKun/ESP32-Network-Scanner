@@ -1,180 +1,202 @@
-#ifndef WIFI_C
-#define WIFI_C
+#ifndef SCAN_C
+#define SCAN_C
 
-#include <stdio.h>
-#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/event_groups.h"
-#include "esp_system.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
 #include "esp_log.h"
+#include "driver/gpio.h"
 #include "nvs_flash.h"
+#include "esp_netif.h"
+#include "esp_netif_net_stack.h"
+#include "lwip/ip4_addr.h"
+#include "lwip/etharp.h"
+#include "lwip/ip_addr.h"
+#include "scan.h"
 
-#include "lwip/err.h"
-#include "lwip/sockets.h"
-#include "lwip/sys.h"
-#include "lwip/netdb.h"
-#include "lwip/dns.h"
+#include <inttypes.h>
 
-/** DEFINES **/
-#define WIFI_SUCCESS 1 << 0
-#define WIFI_FAILURE 1 << 1
-#define TCP_SUCCESS 1 << 0
-#define TCP_FAILURE 1 << 1
-#define MAX_FAILURES 10
+// Define
+#define TAG "SCAN"
+#define ARPTIMEOUT 5000
+// Batch size for outgoing ARP requests; do not redefine lwIP's ARP_TABLE_SIZE
+#define ARP_BATCH_SIZE 5
 
-#define WIFI_SSID ""
-#define WIFI_PASSWORD ""
+// functions
+uint32_t switch_ip_orientation (uint32_t *);
+void nextIP(ip4_addr_t *);
 
-/** GLOBALS **/
+// storing
+uint32_t deviceCount = 0; // store the exact online device count after the loop
+uint32_t maxSubnetDevice = 0; // store the maxium device that subnet can hold
 
-// event group to contain status information
-static EventGroupHandle_t wifi_event_group;
+deviceInfo *deviceInfos; // store all ip, MAC, and online information to device
 
-// retry tracker
-static int s_retry_num = 0;
+// scan all local ips
+void arpScan(void *param) {
+    /* Initialize...  */
+    ESP_LOGI(TAG, "Starting ARP scan");
 
-// task tag
-static const char *TAG = "WIFI";
+    // get esp_netif
+    esp_netif_t* esp_netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    // get netif from esp_netif
+    struct netif *netif = (struct netif *)esp_netif_get_netif_impl(esp_netif);
+    ESP_LOGI(TAG, "Got netif for lwip");
 
-esp_netif_t *netif;
+    // get internet information: ip, gateway, mask
+    esp_netif_ip_info_t ip_info;
+    esp_netif_get_ip_info(esp_netif, &ip_info);
 
-//event handler for wifi events
-static void wifi_event_handler(void* arg, esp_event_base_t event_base,
-                                int32_t event_id, void* event_data)
-{
-	if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START)
-	{
-		ESP_LOGI(TAG, "Connecting to AP...");
-		esp_wifi_connect();
-	} else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED)
-	{
-		if (s_retry_num < MAX_FAILURES)
-		{
-			ESP_LOGI(TAG, "Reconnecting to AP...");
-			esp_wifi_connect();
-			s_retry_num++;
-		} else {
-			xEventGroupSetBits(wifi_event_group, WIFI_FAILURE);
-		}
-	}
-}
+    // get subnet range
+    // uint32_t ip representatione
+    ip4_addr_t target_ipp;
+    target_ipp.addr = ip_info.netmask.addr & ip_info.ip.addr; // get the first ip of subnet
 
-//event handler for ip events
-static void ip_event_handler(void* arg, esp_event_base_t event_base,
-                                int32_t event_id, void* event_data)
-{
-	if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP)
-	{
-        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
-        ESP_LOGI(TAG, "STA IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        s_retry_num = 0;
-        xEventGroupSetBits(wifi_event_group, WIFI_SUCCESS);
-    }
+    // calculate subnet max device count
+    uint32_t normal_mask = switch_ip_orientation(&ip_info.netmask.addr);
+    maxSubnetDevice = UINT32_MAX - normal_mask - 1; // the total count of ips to scan
 
-}
-
-
-esp_err_t connect_AP(){
-    int status = WIFI_FAILURE;
-    ESP_ERROR_CHECK(esp_netif_init());
-
-	//initialize default esp event loop
-	ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-	//create wifi station in the wifi driver
-	esp_netif_create_default_wifi_sta();
-
-	//setup wifi station with the default wifi configuration
-	wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-    /** EVENT LOOP CRAZINESS **/
-	wifi_event_group = xEventGroupCreate();
-
-    // events
-    esp_event_handler_instance_t wifi_handler_event_instance;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
-                                                        ESP_EVENT_ANY_ID,
-                                                        &wifi_event_handler,
-                                                        NULL,
-                                                        &wifi_handler_event_instance));
-
-    esp_event_handler_instance_t got_ip_event_instance;
-    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
-                                                        IP_EVENT_STA_GOT_IP,
-                                                        &ip_event_handler,
-                                                        NULL,
-                                                        &got_ip_event_instance));
-
-    // init config
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = WIFI_SSID,
-            .password = WIFI_PASSWORD
-        }
-    };
-
-    // set the wifi controller to be a station
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
-
-    // set the wifi config
-    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
-
-    // start the wifi driver
-    ESP_ERROR_CHECK(esp_wifi_start());
-
-    ESP_LOGI(TAG, "STA initialization complete");
-
-    EventBits_t bits = xEventGroupWaitBits(wifi_event_group,
-            WIFI_SUCCESS | WIFI_FAILURE,
-            pdFALSE,
-            pdFALSE,
-            portMAX_DELAY);
-
-    /* xEventGroupWaitBits() returns the bits before the call returned, hence we can test which event actually
-     * happened. */
-    if (bits & WIFI_SUCCESS) {
-        ESP_LOGI(TAG, "Connected to ap");
-        status = WIFI_SUCCESS;
-    } else if (bits & WIFI_FAILURE) {
-        ESP_LOGI(TAG, "Failed to connect to ap");
-        status = WIFI_FAILURE;
-    } else {
-        ESP_LOGE(TAG, "UNEXPECTED EVENT");
-        status = WIFI_FAILURE;
-    }
-
-    /* The event will not be processed after unregister */
-    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, got_ip_event_instance));
-    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_handler_event_instance));
-    vEventGroupDelete(wifi_event_group);
-
-    return status;
-
-}
-
-
-void connect_wifi(){
-    esp_err_t status = WIFI_FAILURE;
-
-    //initialize storage
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
-
-    // connect to wireless AP
-    status = connect_AP();
-    if (WIFI_SUCCESS != status)
-    {
-        ESP_LOGI(TAG, "Failed to associate to AP, dying...");
+    // initialize device information storing database
+    deviceInfos = calloc(maxSubnetDevice, sizeof(deviceInfo));
+    if(deviceInfos == NULL){
+        ESP_LOGI(TAG, "Not enough space for storing information");
         return;
     }
+
+    /* Loop start... */
+    // scanning all ips from local network
+    while(1 && netif != NULL){
+        uint32_t onlineDevicesCount = 0;
+
+        ESP_LOGI(TAG,"%" PRIu32 " ips to scan", maxSubnetDevice);
+
+    // ips
+    char char_target_ip[IP4ADDR_STRLEN_MAX]; // char ip for printing
+    ip4_addr_t target_ip, last_ip;
+        target_ip.addr = target_ipp.addr; // first ip in subnet
+        last_ip.addr = (target_ipp.addr)|(~ip_info.netmask.addr); // calculate last ip in subnet
+
+        // scan loop for 5 at a time
+        while(target_ip.addr != last_ip.addr){
+            ip4_addr_t currAddrs[ARP_BATCH_SIZE]; // save current loop ip
+            int currCount = 0; // for checking Arp table use
+
+        // send ARP request in batches; ARP table has limited size
+        for(int i=0; i<ARP_BATCH_SIZE; i++){
+                nextIP(&target_ip); // next ip
+                if(target_ip.addr != last_ip.addr){
+            ip4addr_ntoa_r(&target_ip, char_target_ip, IP4ADDR_STRLEN_MAX);
+                    currAddrs[i] = target_ip;
+                    ESP_LOGI(TAG, "Success sending ARP to %s", char_target_ip);
+
+                    etharp_request(netif, &target_ip);
+                    currCount++;
+                }
+                else break; // ip is last ip in subnet then break
+            }
+            // wait for resopnd
+            vTaskDelay(ARPTIMEOUT / portTICK_PERIOD_MS);
+
+            // find received ARP respond in ARP table
+            for(int i=0; i<currCount; i++){
+                const ip4_addr_t *ipaddr_ret = NULL;
+                struct eth_addr *eth_ret = NULL;
+                char mac[20], char_currIP[IP4ADDR_STRLEN_MAX];
+
+                unsigned int currentIpCount = switch_ip_orientation(&currAddrs[i].addr) - switch_ip_orientation(&target_ipp.addr) - 1; // calculate No. of ip
+                if(etharp_find_addr(netif, &currAddrs[i], &eth_ret, &ipaddr_ret) != -1){ // find in ARP table
+                    // print MAC result for ip
+                    sprintf(mac, "%02X:%02X:%02X:%02X:%02X:%02X",eth_ret->addr[0],eth_ret->addr[1],eth_ret->addr[2],eth_ret->addr[3],eth_ret->addr[4],eth_ret->addr[5]);
+                    ip4addr_ntoa_r(&currAddrs[i], char_currIP, IP4ADDR_STRLEN_MAX);
+                    ESP_LOGI(TAG, "%s's MAC address is %s", char_currIP, mac);
+
+                    // stroing information to database
+                    deviceInfos[currentIpCount].online = 1; // storing online status
+                    deviceInfos[currentIpCount].ip = currAddrs[i].addr; // ip address specified by ip No.
+                    memcpy(deviceInfos[currentIpCount].mac, eth_ret->addr, 6); // storing mac address into database specified by ip No.
+
+                    // count total online device
+                    onlineDevicesCount++;
+                }
+                else{ // not fount in arp table
+                    if(deviceInfos[currentIpCount].online == 1 || deviceInfos[currentIpCount].online == 2){ // previously online
+                        deviceInfos[currentIpCount].online = 2; // prvonline
+                    }
+                    else{
+                        deviceInfos[currentIpCount].online = 0; // offline
+
+                        deviceInfos[currentIpCount].ip = currAddrs[i].addr;
+                    }
+                }
+            }
+        }
+
+        // update deviceCount
+        deviceCount = onlineDevicesCount;
+
+        // print network scanning result
+        ESP_LOGI(TAG, "%" PRIu32 " devices are on local network", onlineDevicesCount);
+
+        // wait unti next scan cycle
+        ESP_LOGI(TAG, "Sacnner now sleeping");
+
+        /* viewing database */
+        /*
+        for(int i=0; i<100; i++){
+            if(deviceInfos[i].online == 1){
+                ESP_LOGI(TAG, "Online %02X:%02X:%02X:%02X:%02X:%02X",\
+                deviceInfos[i].mac[0], deviceInfos[i].mac[1],deviceInfos[i].mac[2],deviceInfos[i].mac[3],deviceInfos[i].mac[4],deviceInfos[i].mac[5]);
+            }
+        }
+        */
+
+        // sleeping task until next scan cycle
+        vTaskDelay( 10*1000 / portTICK_PERIOD_MS);
+    }
+    /* Loop End...*/
+}
+
+
+// switch between the lwip and the normal way of representation of ipv4
+uint32_t switch_ip_orientation (uint32_t *ipv4){
+    uint32_t ip =   ((*ipv4 & 0xff000000) >> 24)|\
+                    ((*ipv4 & 0xff0000) >> 8)|\
+                    ((*ipv4 & 0xff00) << 8)|\
+                    ((*ipv4 & 0xff) << 24);
+    return ip;
+}
+
+// get the next ip in numerical order
+void nextIP(ip4_addr_t *ip){
+    // reconstruct it to normal order
+    ip4_addr_t normal_ip;
+    normal_ip.addr = switch_ip_orientation(&ip->addr); // switch to the normal way
+
+    // check if ip is the last ip in subnet
+    if(normal_ip.addr == UINT32_MAX) return;
+
+    // add one to obtain the next ip address location
+    normal_ip.addr += (uint32_t)1;
+    ip->addr = switch_ip_orientation(&normal_ip.addr); // switch back the lwip way
+
+    return;
+}
+
+
+/* values */
+
+// get subnet max device
+uint32_t getMaxDevice(){
+    return maxSubnetDevice;
+}
+
+// get device count
+uint32_t getDeviceCount(){
+    return deviceCount;
+}
+
+// get database
+deviceInfo * getDeviceInfos(){
+    return deviceInfos;
 }
 
 #endif
